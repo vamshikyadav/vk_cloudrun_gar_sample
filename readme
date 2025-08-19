@@ -15,4 +15,12 @@ SERVICE_URL=$(gcloud run services describe hello-world --region REGION --format=
 curl -s $SERVICE_URL/
 curl -s $SERVICE_URL/healthz
 
+## See container/startup/probe failures clearly
+gcloud run services logs read vak-srv --region REGION --limit 100
+
+## Describe the latest revision + events
+gcloud run services describe vak-srv --region REGION --format='value(status.latestCreatedRevisionName)'
+gcloud run revisions describe $(!!) --region REGION
+
+
 
