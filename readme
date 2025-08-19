@@ -1,0 +1,12 @@
+## Docker build
+gcloud builds submit \
+  --tag REGION-docker.pkg.dev/PROJECT_ID/REPO/vk-helloworld:1
+
+## cloud run 
+gcloud run deploy hello-world \
+  --image REGION-docker.pkg.dev/PROJECT_ID/REPO/hello:1 \
+  --region REGION \
+  --allow-unauthenticated \
+  --port 8080 \
+  --liveness-probe httpGet.path=/healthz,httpGet.port=8080,initialDelaySeconds=0,failureThreshold=3,timeoutSeconds=1,periodSeconds=10
+

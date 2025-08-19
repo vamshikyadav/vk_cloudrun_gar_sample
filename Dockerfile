@@ -1,9 +1,7 @@
-FROM maven:3.9-eclipse-temurin-17
+FROM python:3.11-slim
 WORKDIR /app
-COPY pom.xml .
-RUN mvn -q dependency:go-offline
-COPY src ./src
-RUN mvn -q package -DskipTests
-EXPOSE 8080
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
 ENV PORT=8080
-CMD ["java", "-jar", "target/cloudrun-demo-0.0.1.jar"]
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "app:app"]
