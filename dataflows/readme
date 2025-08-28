@@ -1,0 +1,23 @@
+# Dataflow with cloud run
+Cloud Run API (FastAPI)
+Routes like /env/prefix1 or /env/prefix2 trigger specific Dataflow Flex/Classic templates with env/prefix params.
+Config in GCS (YAML)
+Maps env/prefix → template path, region, worker cfg, pipeline params.
+Run Registry (BigQuery table) to record every trigger + live status.
+Progress tracking
+Poll Dataflow Jobs API (projects.locations.jobs.get) for stage summaries + metrics.
+Optional: pipeline logs push “step events” to Pub/Sub → Dataflow/CF → BigQuery for richer per-step timeline.
+
+# URL design
+POST /{env}/{prefix}/run – trigger job
+GET /{env}/{prefix}/runs – list recent runs from BigQuery
+GET /jobs/{job_id} – live status (stages, current step, metrics)
+POST /webhooks/dataflow – (optional) receive events you emit from pipeline
+Examples:
+POST /npe/customercare/run
+GET /uat/customercare/runs
+GET /jobs/2025-08-28_12_34_56-1234567890123456789
+
+# Dashboard
+Custom UI on Cloud Run pulling Dataflow + BigQuery (Composer-feel).
+
