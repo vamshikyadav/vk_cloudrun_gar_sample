@@ -21,6 +21,53 @@ from vertexai.generative_models import GenerativeModel
 
 
 # ---------------------------- Utilities ----------------------------
+def render_ops_logo():
+    logo_css = """
+    <style>
+      .ops-wrap { display:flex; flex-direction:column; align-items:center; margin: .25rem 0 1.25rem 0; }
+      .ops-logo {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial;
+        font-weight: 800;
+        font-size: clamp(30px, 6vw, 64px);
+        text-transform: uppercase;
+        letter-spacing: .14em;
+        line-height: 1.05;
+        background: linear-gradient(90deg,#00f5ff,#7a5cff,#ff4ecd,#ff9f0a,#00f5ff);
+        background-size: 200% 200%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        filter: drop-shadow(0 0 6px rgba(122,92,255,.55)) drop-shadow(0 0 22px rgba(255,78,205,.35));
+        animation: ops-hue 9s linear infinite, ops-glow 2.4s ease-in-out infinite alternate, ops-gradient 10s ease infinite;
+        margin: 0;
+      }
+      .ops-sub {
+        margin-top: .1rem;
+        color: #a0a8b8;
+        font-size: 12px;
+        letter-spacing: .24em;
+        text-transform: uppercase;
+        opacity: .9;
+      }
+      @keyframes ops-hue { from { filter: hue-rotate(0deg); } to { filter: hue-rotate(360deg); } }
+      @keyframes ops-glow {
+        from { text-shadow: 0 0 6px rgba(122,92,255,.6), 0 0 18px rgba(255,78,205,.35); transform: translateY(0); }
+        to   { text-shadow: 0 0 12px rgba(0,245,255,.75), 0 0 26px rgba(255,159,10,.35); transform: translateY(-1px); }
+      }
+      @keyframes ops-gradient {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+    </style>
+    """
+    html = """
+      <div class="ops-wrap">
+        <h1 class="ops-logo">Operations</h1>
+        <div class="ops-sub">Dataflow • Vertex AI • Observability</div>
+      </div>
+    """
+    st.markdown(logo_css + html, unsafe_allow_html=True)
 
 def get_env(name: str, default_val: Optional[str] = None) -> str:
     v = os.getenv(name)
@@ -234,10 +281,13 @@ RECENT ERROR LOGS (up to 10):
 
 # ---------------------------- UI ----------------------------
 
-st.set_page_config(page_title="Dataflow Health (Vertex AI)", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="Dataflow Health (Vertex AI)", page_icon="🎛️", layout="wide")
+render_ops_logo()  # <-- add this line
 st.title("⚙️ Dataflow Health — Vertex AI Assisted")
 
 with st.sidebar:
+    st.markdown("<div style='margin-top:-10px'></div>", unsafe_allow_html=True)
+    render_ops_logo()
     st.header("Settings")
     project_id = st.text_input("Project ID", value=get_env("PROJECT_ID"))
     region = st.text_input("Dataflow Region", value=get_env("DATAFLOW_REGION", "us-central1"))
