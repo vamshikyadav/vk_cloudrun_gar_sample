@@ -28,3 +28,8 @@ export DATAFLOW_REGION=us-central1
 export VERTEX_REGION=us-central1
 streamlit run app.py --server.port=8080 --server.headless=true
 
+
+## Call service with a signed token
+ID_TOKEN=$(gcloud auth print-identity-token)
+curl -H "Authorization: Bearer ${ID_TOKEN}" \
+  https://<cloud-run-url>/
