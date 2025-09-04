@@ -1,5 +1,8 @@
+# app.py
+# Streamlit app to inspect Dataflow jobs and use Vertex AI (Gemini) for a health summary.
+# Includes Fix A: use system_instruction + plain user text to avoid Part merge type errors.
+
 import os
-import time
 import json
 import datetime as dt
 from typing import List, Dict, Any, Optional
@@ -12,15 +15,17 @@ from googleapiclient.discovery import build
 from google.cloud import logging as gcloud_logging
 from google.api_core.exceptions import NotFound
 
-# --- Vertex AI (Gemini) ---
+# Vertex AI (Gemini)
 import vertexai
 from vertexai.generative_models import GenerativeModel
+
 
 # ---------------------------- Utilities ----------------------------
 
 def get_env(name: str, default_val: Optional[str] = None) -> str:
     v = os.getenv(name)
     return v if v is not None else (default_val or "")
+
 
 @st.cache_data(show_spinner=False, ttl=60)
 def list_dataflow_jobs(project_id: str, region: str) -> List[Dict[str, Any]]:
@@ -29,32 +34,24 @@ def list_dataflow_jobs(project_id: str, region: str) -> List[Dict[str, Any]]:
     """
     creds, _ = default()
     svc = build("dataflow", "v1b3", credentials=creds, cache_discovery=False)
-    request = svc.projects().locations().jobs().list(
-        projectId=project_id,
-        location=region,
-        pageSize=200,
-        filter="ACTIVE"  # we'll fetch ACTIVE first, then TERMINATED
-    )
 
-    jobs = []
-    while request is not None:
-        resp = request.execute()
-        jobs.extend(resp.get("jobs", []))
-        request = svc.projects().locations().jobs().list_next(previous_request=request, previous_response=resp)
+    def _list(filter_val: str):
+        req = svc.projects().locations().jobs().list(
+            projectId=project_id,
+            location=region,
+            pageSize=200,
+            filter=filter_val
+        )
+        jobs_ = []
+        while req is not None:
+            resp = req.execute()
+            jobs_.extend(resp.get("jobs", []))
+            req = svc.projects().locations().jobs().list_next(previous_request=req, previous_response=resp)
+        return jobs_
 
-    # also pull TERMINATED jobs (recent history)
-    request = svc.projects().locations().jobs().list(
-        projectId=project_id,
-        location=region,
-        pageSize=200,
-        filter="TERMINATED"
-    )
-    while request is not None:
-        resp = request.execute()
-        jobs.extend(resp.get("jobs", []))
-        request = svc.projects().locations().jobs().list_next(previous_request=request, previous_response=resp)
+    jobs = _list("ACTIVE") + _list("TERMINATED")
 
-    # Deduplicate by id (ACTIVE can also appear as TERMINATED in rare race windows)
+    # Deduplicate by id
     seen = set()
     unique = []
     for j in jobs:
@@ -67,16 +64,16 @@ def list_dataflow_jobs(project_id: str, region: str) -> List[Dict[str, Any]]:
     cutoff = dt.datetime.utcnow() - dt.timedelta(days=7)
     pruned = []
     for j in unique:
-        # try to parse startTime or createTime
         t = j.get("createTime") or j.get("startTime")
         try:
             ts = dt.datetime.fromisoformat(t.replace("Z", "+00:00")) if t else None
         except Exception:
             ts = None
-        if (ts is None) or (ts >= cutoff.replace(tzinfo=ts.tzinfo)):
+        if (ts is None) or (ts >= cutoff.replace(tzinfo=ts.tzinfo if ts else None)):
             pruned.append(j)
 
     return pruned
+
 
 @st.cache_data(show_spinner=False, ttl=60)
 def get_job_metrics(project_id: str, region: str, job_id: str) -> Dict[str, Any]:
@@ -90,18 +87,19 @@ def get_job_metrics(project_id: str, region: str, job_id: str) -> Dict[str, Any]
     ).execute()
     return resp
 
+
 @st.cache_data(show_spinner=False, ttl=60)
-def get_recent_error_logs(project_id: str, job_id: str, lookback_minutes: int = 120, limit: int = 50) -> List[Dict[str, Any]]:
+def get_recent_error_logs(
+    project_id: str,
+    job_id: str,
+    lookback_minutes: int = 120,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
     """
     Pull recent ERROR logs for the Dataflow job_id from Cloud Logging.
     """
     client = gcloud_logging.Client(project=project_id)
-    logger = client.logger("dataflow")  # not strictly necessary
 
-    # Dataflow logs usually use one of these resources:
-    # - resource.type="dataflow_step" with labels job_id, project_id, region, step_id
-    # - resource.type="dataflow_job"  (newer)
-    # We’ll OR the two types, filtered by job_id.
     end = dt.datetime.utcnow()
     start = end - dt.timedelta(minutes=lookback_minutes)
     filter_str = f'''
@@ -118,68 +116,23 @@ def get_recent_error_logs(project_id: str, job_id: str, lookback_minutes: int = 
     entries = list(client.list_entries(filter_=filter_str, order_by=gcloud_logging.DESCENDING))
     out = []
     for e in entries[:limit]:
+        # e.payload can be string or dict
+        if isinstance(e.payload, str):
+            msg = e.payload
+        else:
+            try:
+                msg = json.dumps(e.payload, default=str)
+            except Exception:
+                msg = str(e.payload)
+
         out.append({
-            "timestamp": e.timestamp.isoformat() if e.timestamp else "",
-            "severity": str(e.severity),
-            "message": e.payload if isinstance(e.payload, str) else json.dumps(e.payload, default=str)[:2000],
+            "timestamp": e.timestamp.isoformat() if getattr(e, "timestamp", None) else "",
+            "severity": str(getattr(e, "severity", "")),
+            "message": msg[:2000],
             "trace": getattr(e, "trace", None),
         })
     return out
 
-def init_vertex(project_id: str, region: str):
-    vertexai.init(project=project_id, location=region)
-
-def gemini_summarize(project_id: str, vertex_region: str, job: Dict[str, Any], metrics: Dict[str, Any], errors: List[Dict[str, Any]]) -> str:
-    """
-    Use Vertex Gemini to summarize job health & next actions.
-    """
-    init_vertex(project_id, vertex_region)
-    model = GenerativeModel("gemini-1.5-pro")
-
-    job_core = {
-        "id": job.get("id"),
-        "name": job.get("name"),
-        "type": job.get("type"),
-        "currentState": job.get("currentState"),
-        "createTime": job.get("createTime"),
-        "startTime": job.get("startTime"),
-        "endTime": job.get("endTime"),
-        "location": job.get("location"),
-        "labels": job.get("labels", {}),
-        "parameters": job.get("environment", {}).get("sdkPipelineOptions", {}),
-    }
-
-    metric_summ = metrics.get("metrics", [])
-    error_texts = [f'{e.get("timestamp","")} [{e.get("severity","")}]: {e.get("message","")}' for e in errors[:10]]
-
-    system_msg = (
-        "You are a GCP Dataflow reliability assistant. "
-        "Given a Dataflow job summary, metrics and recent error logs, "
-        "produce a concise health summary with: "
-        "1) Current status & likely cause, 2) Impact (if any), "
-        "3) Top 3 next steps with concrete GCP console or CLI paths, "
-        "4) If healthy, recommended validations."
-    )
-
-    user_msg = f"""
-JOB:
-{json.dumps(job_core, indent=2)}
-
-METRICS (truncated):
-{json.dumps(metric_summ[:30], indent=2)}
-
-RECENT ERROR LOGS (up to 10):
-{json.dumps(error_texts, indent=2)}
-"""
-
-    resp = model.generate_content(
-        [
-            {"role": "system", "parts": [system_msg]},
-            {"role": "user", "parts": [user_msg]},
-        ],
-        safety_settings=None,
-    )
-    return resp.text if hasattr(resp, "text") else str(resp)
 
 def fmt_jobs_df(jobs: List[Dict[str, Any]]) -> pd.DataFrame:
     rows = []
@@ -196,16 +149,92 @@ def fmt_jobs_df(jobs: List[Dict[str, Any]]) -> pd.DataFrame:
             "Labels": json.dumps(j.get("labels", {})),
         })
     df = pd.DataFrame(rows)
-    # nice sort: active first, then recent
-    state_order = {"JOB_STATE_RUNNING": 0, "JOB_STATE_DRAINING": 1, "JOB_STATE_QUEUED": 2}
+    # Active first, then recent
+    state_order = {
+        "JOB_STATE_RUNNING": 0,
+        "JOB_STATE_DRAINING": 1,
+        "JOB_STATE_QUEUED": 2
+    }
     df["state_sort"] = df["State"].map(lambda s: state_order.get(s, 9))
     df = df.sort_values(by=["state_sort", "Created"], ascending=[True, False]).drop(columns=["state_sort"])
     return df
 
+
+# ---------------------------- Vertex AI: Fix A ----------------------------
+
+def gemini_summarize(
+    project_id: str,
+    vertex_region: str,
+    job: Dict[str, Any],
+    metrics: Dict[str, Any],
+    errors: List[Dict[str, Any]]
+) -> str:
+    """
+    Use Vertex Gemini to summarize job health & next actions.
+    FIX A: Use system_instruction + plain user text to avoid Part type errors.
+    """
+    vertexai.init(project=project_id, location=vertex_region)
+
+    system_msg = (
+        "You are a GCP Dataflow reliability assistant. "
+        "Given a Dataflow job summary, metrics and recent error logs, "
+        "produce a concise health summary with: "
+        "1) Current status & likely cause, 2) Impact (if any), "
+        "3) Top 3 next steps with concrete GCP Console or gcloud paths, "
+        "4) If healthy, recommended validations."
+    )
+
+    job_core = {
+        "id": job.get("id"),
+        "name": job.get("name"),
+        "type": job.get("type"),
+        "currentState": job.get("currentState"),
+        "createTime": job.get("createTime"),
+        "startTime": job.get("startTime"),
+        "endTime": job.get("endTime"),
+        "location": job.get("location"),
+        "labels": job.get("labels", {}),
+        "parameters": job.get("environment", {}).get("sdkPipelineOptions", {}),
+    }
+
+    metric_summ = metrics.get("metrics", [])
+    error_texts = [
+        f'{e.get("timestamp","")} [{e.get("severity","")}]: {e.get("message","")}'
+        for e in errors[:10]
+    ]
+
+    user_msg = f"""
+JOB:
+{json.dumps(job_core, indent=2)}
+
+METRICS (truncated):
+{json.dumps(metric_summ[:30], indent=2)}
+
+RECENT ERROR LOGS (up to 10):
+{json.dumps(error_texts, indent=2)}
+"""
+
+    model = GenerativeModel(
+        "gemini-1.5-pro",
+        system_instruction=system_msg
+    )
+
+    resp = model.generate_content(
+        user_msg,
+        generation_config={"temperature": 0.2, "max_output_tokens": 1024}
+    )
+
+    # Robust text extraction across SDK versions
+    try:
+        return resp.text
+    except AttributeError:
+        # Fallback for older responses
+        return resp.candidates[0].content.parts[0].text
+
+
 # ---------------------------- UI ----------------------------
 
 st.set_page_config(page_title="Dataflow Health (Vertex AI)", page_icon="⚙️", layout="wide")
-
 st.title("⚙️ Dataflow Health — Vertex AI Assisted")
 
 with st.sidebar:
@@ -214,7 +243,6 @@ with st.sidebar:
     region = st.text_input("Dataflow Region", value=get_env("DATAFLOW_REGION", "us-central1"))
     vertex_region = st.text_input("Vertex AI Region", value=get_env("VERTEX_REGION", region))
     lookback = st.number_input("Error Log Lookback (minutes)", min_value=15, max_value=1440, value=120, step=15)
-
     st.caption("These should match your Cloud Run service env vars / service account permissions.")
 
 if not project_id:
@@ -245,7 +273,7 @@ sel = st.selectbox("Select job", options=job_names, index=0)
 sel_job = jobs[job_names.index(sel)]
 sel_job_id = sel_job.get("id")
 
-cols = st.columns([1,1,1,1,1])
+cols = st.columns([1, 1, 1, 1, 1])
 with cols[0]:
     if st.button("Refresh Metrics & Logs"):
         st.cache_data.clear()
@@ -266,7 +294,7 @@ with st.spinner("Getting recent error logs…"):
         st.error(f"Error fetching error logs: {e}")
         errors = []
 
-mcol1, mcol2 = st.columns([1,1])
+mcol1, mcol2 = st.columns([1, 1])
 with mcol1:
     st.markdown("**Metrics (truncated view)**")
     metrics_list = metrics.get("metrics", [])
@@ -300,6 +328,5 @@ if st.button("Analyze with Vertex AI (Gemini)"):
             st.write(summary)
         except Exception as e:
             st.error(f"Vertex AI analysis failed: {e}")
-            st.stop()
 
 st.caption("Powered by Streamlit • Dataflow API • Cloud Logging • Vertex AI Gemini")
