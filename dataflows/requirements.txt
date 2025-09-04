@@ -1,0 +1,13 @@
+streamlit==1.36.0
+
+# Google APIs / SDK
+google-auth==2.34.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.142.0
+google-cloud-logging==3.11.2
+
+# Vertex AI
+google-cloud-aiplatform==1.71.1
+vertexai==1.71.1
+
+pandas==2.2.2

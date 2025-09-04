@@ -1,35 +1,32 @@
-# Minimal Debian with Java + gcloud
-FROM debian:bookworm-slim
+# Base
+FROM python:3.11-slim
 
-# Install deps: curl, jq, Java 17, and Google Cloud SDK
-RUN apt-get update && apt-get install -y curl gnupg ca-certificates jq openjdk-17-jre \
- && curl -sSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
- && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list \
- && apt-get update && apt-get install -y google-cloud-cli \
- && apt-get clean && rm -rf /var/lib/apt/lists/*
+# System deps (clean, minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
+# App code
 WORKDIR /app
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Environment (override at deploy time)
-ENV JAVA_HEAP="-Xms512m -Xmx1024m"
-ENV REGION="us-central1"
-ENV ENV="dev"                        # dev | qa | prod
-ENV JOB_NAME_BASE="my-pipeline"
+COPY app.py ./app.py
+
+# Streamlit server config for Cloud Run (port 8080, headless)
+ENV PORT=8080
+ENV STREAMLIT_SERVER_PORT=8080
+ENV STREAMLIT_SERVER_ENABLECORS=true
+ENV STREAMLIT_SERVER_HEADLESS=true
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+# Optional: pass defaults via env (override at deploy)
 ENV PROJECT_ID=""
-ENV GCS_STAGING_BUCKET=""
-ENV GCS_TEMP_BUCKET=""
+ENV DATAFLOW_REGION="us-central1"
+ENV VERTEX_REGION="us-central1"
 
-# Nexus info (store real values in Secret Manager and mount as env)
-ENV NEXUS_URL=""
-ENV NEXUS_USER=""
-ENV NEXUS_PASSWORD=""
+# Expose for local runs (Cloud Run ignores EXPOSE, but fine)
+EXPOSE 8080
 
-# Extra pipeline args (space-separated, e.g. '--input=gs://... --output=gs://...')
-ENV PIPELINE_ARGS=""
-
-# Where to publish progress updates
-ENV PUBSUB_TOPIC="df-events"
-
-ENTRYPOINT ["/app/entrypoint.sh"]
+# Entry
+CMD ["bash", "-lc", "streamlit run app.py --server.port=${PORT} --server.headless=true"]
