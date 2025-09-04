@@ -1,10 +1,17 @@
 # Base
 FROM python:3.11-slim
 
-# System deps (clean, minimal)
+# System deps 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential \
+    pkg-config \
+    meson \
+    ninja-build \
+    libffi-dev \
+    libssl-dev \
+    git \
+    curl \
+  && rm -rf /var/lib/apt/lists/*
 
 # App code
 WORKDIR /app
