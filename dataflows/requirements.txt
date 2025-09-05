@@ -6,6 +6,9 @@ google-cloud-logging==3.11.2
 google-cloud-aiplatform==1.71.1
 vertexai==1.71.1
 pandas==2.2.2
+google-cloud-bigquery==3.25.0
+google-cloud-storage==2.18.2
+
 # numpy==2.0.2
 # grpcio==1.66.1
 # pyarrow==17.0.0
