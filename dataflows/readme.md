@@ -33,3 +33,15 @@ streamlit run app.py --server.port=8080 --server.headless=true
 ID_TOKEN=$(gcloud auth print-identity-token)
 curl -H "Authorization: Bearer ${ID_TOKEN}" \
   https://<cloud-run-url>/
+
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.google.com/gke-nodepool
+                operator: In
+                values: ["pool-a"]
