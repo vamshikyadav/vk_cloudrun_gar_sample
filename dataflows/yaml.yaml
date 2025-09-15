@@ -9,3 +9,12 @@ spec:
               - key: cloud.google.com/gke-nodepool
                 operator: In
                 values: ["pool-a"]
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: pd-standard-wffc
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: pd-standard
+  # (optional) fsType: ext4
