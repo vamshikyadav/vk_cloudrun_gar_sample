@@ -18,3 +18,14 @@ volumeBindingMode: WaitForFirstConsumer
 parameters:
   type: pd-standard
   # (optional) fsType: ext4
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: pd-standard-wffc-retain
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: WaitForFirstConsumer   # create the disk in the same zone as the node that schedules the pod
+reclaimPolicy: Retain                     # DON’T delete the disk when PVC is deleted
+allowVolumeExpansion: true
+parameters:
+  type: pd-standard
