@@ -8,6 +8,8 @@
 # =========================
 # app.py
 # =========================
+# Project: Streamlit Blue/Green PR Orchestrator (case-insensitive appversion, weights & switches)
+
 import base64
 import io
 import json
@@ -43,7 +45,6 @@ class GH:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-    # ---- Core REST helpers ----
     def _req(self, method: str, path: str, **kwargs):
         url = f"{self.base}{path}"
         r = requests.request(method, url, headers=self.headers, timeout=60, **kwargs)
@@ -51,7 +52,6 @@ class GH:
             raise RuntimeError(f"GitHub API error {r.status_code}: {r.text}")
         return r.json() if r.text else {}
 
-    # ---- Repo helpers ----
     def get_default_branch(self, owner: str, repo: str) -> str:
         data = self._req("GET", f"/repos/{owner}/{repo}")
         return data.get("default_branch", "main")
@@ -72,26 +72,12 @@ class GH:
         params = {"ref": ref} if ref else None
         return self._req("GET", f"/repos/{owner}/{repo}/contents/{path}", params=params)
 
-    def update_file(
-        self,
-        owner: str,
-        repo: str,
-        path: str,
-        message: str,
-        new_content_bytes: bytes,
-        branch: str,
-        sha: str,
-    ) -> Dict:
+    def update_file(self, owner: str, repo: str, path: str, message: str, new_content_bytes: bytes, branch: str, sha: str) -> Dict:
         b64 = base64.b64encode(new_content_bytes).decode("utf-8")
         return self._req(
             "PUT",
             f"/repos/{owner}/{repo}/contents/{path}",
-            json={
-                "message": message,
-                "content": b64,
-                "branch": branch,
-                "sha": sha,
-            },
+            json={"message": message, "content": b64, "branch": branch, "sha": sha},
         )
 
     def create_pr(self, owner: str, repo: str, head: str, base: str, title: str, body: str = "") -> Dict:
@@ -101,7 +87,6 @@ class GH:
             json={"title": title, "head": head, "base": base, "body": body},
         )
 
-    # ---- Actions ----
     def dispatch_workflow(self, owner: str, repo: str, workflow_file: str, ref: str, inputs: Optional[Dict] = None) -> Dict:
         return self._req(
             "POST",
@@ -113,19 +98,22 @@ class GH:
         params = {"per_page": per_page}
         if branch:
             params["branch"] = branch
-        return self._req(
-            "GET",
-            f"/repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs",
-            params=params,
-        )
+        return self._req("GET", f"/repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs", params=params)
 
 # -------------- YAML helpers --------------
 
 def _lower_keys(d: Dict):
     return {str(k).lower(): v for k, v in d.items()}
 
+def _set_key_case_insensitive(d: Dict, key_options, value):
+    opts = {str(k).lower() for k in key_options}
+    for k in list(d.keys()):
+        if str(k).lower() in opts:
+            d[k] = value
+            return
+    d[next(iter(key_options))] = value
+
 def detect_active_slot(doc: Dict) -> str:
-    # Try reading from 'blue.activeslot' first; fallback to 'green.activeslot'.
     lk = _lower_keys(doc)
     blue = lk.get("blue", {})
     green = lk.get("green", {})
@@ -133,48 +121,54 @@ def detect_active_slot(doc: Dict) -> str:
         return _lower_keys(blue)["activeslot"].strip().lower()
     if isinstance(green, dict) and "activeslot" in _lower_keys(green):
         return _lower_keys(green)["activeslot"].strip().lower()
-    # Fallback: if root has activeslot
     if "activeslot" in lk:
         return str(lk["activeslot"]).strip().lower()
-    return "blue"  # default
-
+    return "blue"
 
 def set_active_slot_both(doc: Dict, slot: str) -> None:
-    # Ensure both blue.activeslot and green.activeslot are set to the same value
     for section_name in ["blue", "green", "Blue", "Green"]:
         if section_name in doc and isinstance(doc[section_name], dict):
-            doc[section_name]["activeslot"] = slot
-
+            _set_key_case_insensitive(doc[section_name], ["activeslot", "ActiveSlot"], slot)
+    for sec in ["blue", "green", "Blue", "Green"]:
+        if sec in doc and isinstance(doc[sec], dict):
+            is_active = sec.lower() == slot.lower()
+            _set_key_case_insensitive(doc[sec], ["Weight", "weight"], 100 if is_active else 0)
+            _set_key_case_insensitive(doc[sec], ["Standbyweight", "standbyweight", "Standybyweight", "standybyweight"], 0 if is_active else 100)
 
 def update_version(doc: Dict, slot: str, new_version: str) -> None:
-    # Update Appversion_blue/Appversion_green based on target slot
-    keys = list(doc.keys())
     found = False
-    for k in keys:
+    for k in list(doc.keys()):
         lk = str(k).lower()
-        if slot == "blue" and lk == "appversion_blue":
+        if slot == "blue" and lk in ["appversion_blue", "appversionblue"]:
             doc[k] = new_version
             found = True
-        if slot == "green" and lk == "appversion_green":
+        if slot == "green" and lk in ["appversion_green", "appversiongreen"]:
             doc[k] = new_version
             found = True
-    # If keys didn't exist, create them with original casing
     if not found:
         if slot == "blue":
             doc["Appversion_blue"] = new_version
         else:
             doc["Appversion_green"] = new_version
 
-
 def standby_slot(active: str) -> str:
     return "green" if active == "blue" else "blue"
+
+def turn_off_standby_switch(doc: Dict, standby: str):
+    if standby == "blue":
+        for sec in ["blue", "Blue"]:
+            if sec in doc and isinstance(doc[sec], dict):
+                _set_key_case_insensitive(doc[sec], ["blueswitch", "BlueSwitch"], "off")
+    if standby == "green":
+        for sec in ["green", "Green"]:
+            if sec in doc and isinstance(doc[sec], dict):
+                _set_key_case_insensitive(doc[sec], ["greenswitch", "GreenSwitch"], "off")
 
 # -------------- PR builders --------------
 
 def build_branch_name(app: str, env_label: str, action: str) -> str:
     app_slug = app.replace("/", "-")
     return f"feat/{app_slug}-{env_label}-{action}-{_now_slug()}"
-
 
 def pr_title(app: str, env_label: str, action: str, version: Optional[str] = None) -> str:
     if version:
@@ -190,10 +184,7 @@ def load_yaml_from_repo(gh: GH, owner: str, repo: str, path: str, ref: str) -> T
     content_bytes = base64.b64decode(content_b64)
     yaml_loader = _yaml_loader()
     data = yaml_loader.load(io.StringIO(content_bytes.decode("utf-8")))
-    if data is None:
-        data = {}
-    return data, sha, content_bytes
-
+    return data or {}, sha, content_bytes
 
 def dump_yaml_to_bytes(doc: Dict) -> bytes:
     yaml_dumper = _yaml_loader()
@@ -201,73 +192,32 @@ def dump_yaml_to_bytes(doc: Dict) -> bytes:
     yaml_dumper.dump(doc, s)
     return s.getvalue().encode("utf-8")
 
-
-def propose_version_update(
-    gh: GH,
-    owner: str,
-    repo: str,
-    base_branch: str,
-    yaml_path: str,
-    app_label: str,
-    env_label: str,
-    target_slot: str,
-    new_version: str,
-) -> Dict:
-    # Create branch
+def propose_version_update(gh: GH, owner: str, repo: str, base_branch: str, yaml_path: str, app_label: str, env_label: str, target_slot: str, new_version: str) -> Dict:
     branch_name = build_branch_name(app_label, env_label, f"update-{target_slot}-version")
     gh.create_branch(owner, repo, branch_name, base_branch)
-
-    # Load file from new branch (same as base content)
     doc, sha, _ = load_yaml_from_repo(gh, owner, repo, yaml_path, base_branch)
-
-    # Update the version
     update_version(doc, target_slot, new_version)
-
-    # Ensure activeslot consistency hints (optional): keep as-is; only version bump here.
-
-    # Write back
     new_bytes = dump_yaml_to_bytes(doc)
     commit_msg = f"chore({app_label}): bump {target_slot} version to {new_version} [{env_label}]"
     gh.update_file(owner, repo, yaml_path, commit_msg, new_bytes, branch_name, sha)
-
-    # Create PR
     title = pr_title(app_label, env_label, f"Update {target_slot} version", new_version)
-    body = (
-        f"Automated PR via Streamlit app.\n\n"
-        f"**App:** {app_label}\n\n**Env:** {env_label}\n\n**Target slot:** {target_slot}\n\n**New version:** {new_version}\n"
-    )
-    pr = gh.create_pr(owner, repo, head=branch_name, base=base_branch, title=title, body=body)
+    pr = gh.create_pr(owner, repo, head=branch_name, base=base_branch, title=title, body=f"Automated PR for {app_label} {env_label}")
     return {"branch": branch_name, "pr": pr}
 
-
-def propose_auto_flip(
-    gh: GH,
-    owner: str,
-    repo: str,
-    base_branch: str,
-    yaml_path: str,
-    app_label: str,
-    env_label: str,
-) -> Dict:
+def propose_auto_flip(gh: GH, owner: str, repo: str, base_branch: str, yaml_path: str, app_label: str, env_label: str, turn_off_switch: bool = False) -> Dict:
     branch_name = build_branch_name(app_label, env_label, "auto-flip")
     gh.create_branch(owner, repo, branch_name, base_branch)
-
     doc, sha, _ = load_yaml_from_repo(gh, owner, repo, yaml_path, base_branch)
     active = detect_active_slot(doc)
     target = standby_slot(active)
-
     set_active_slot_both(doc, target)
-
+    if turn_off_switch:
+        turn_off_standby_switch(doc, standby_slot(target))
     new_bytes = dump_yaml_to_bytes(doc)
     commit_msg = f"feat({app_label}): auto-flip active slot to {target} [{env_label}]"
     gh.update_file(owner, repo, yaml_path, commit_msg, new_bytes, branch_name, sha)
-
     title = pr_title(app_label, env_label, f"Auto flip to {target}")
-    body = (
-        f"Automated PR to flip activeslot.\n\n"
-        f"**App:** {app_label}\n\n**Env:** {env_label}\n\n**New active slot:** {target}\n"
-    )
-    pr = gh.create_pr(owner, repo, head=branch_name, base=base_branch, title=title, body=body)
+    pr = gh.create_pr(owner, repo, head=branch_name, base=base_branch, title=title, body=f"Automated PR flipping active slot to {target}")
     return {"branch": branch_name, "pr": pr, "new_active": target}
 
 # -------------- Streamlit UI --------------
@@ -276,155 +226,78 @@ def ui_header():
     st.title(APP_TITLE)
     st.caption("Generate PRs to update versions and flip blue/green slots. Cloud Run ready.")
 
-
 def ui_sidebar() -> Dict:
     with st.sidebar:
         st.subheader("GitHub Settings")
-        gh_token = st.text_input("GitHub Token", type="password", help="A token with repo & workflow scopes.")
+        gh_token = st.text_input("GitHub Token", type="password")
         owner = st.text_input("Owner / Org", value="your-org")
         repo = st.text_input("Repository", value="your-repo")
-        base_branch = st.text_input("Base branch (default)", value="", help="If empty, we will detect it.")
-
-        st.divider()
-        st.subheader("Repo Paths")
-        app_label = st.text_input("App label (e.g., app1)", value="app1")
-        yaml_path = st.text_input("YAML path (relative)", value="apps/app1/values-dev-us.yaml",
-                                  help="Exact path to the environment YAML file.")
-
-        st.divider()
-        st.subheader("Production Workflows (optional)")
-        workflow_file = st.text_input("Workflow filename", value="ci-tests.yml",
-                                      help=".github/workflows/<this-file>")
-        workflow_ref = st.text_input("Workflow ref (branch/tag)", value="", help="Defaults to base branch")
-
-        return {
-            "gh_token": gh_token,
-            "owner": owner,
-            "repo": repo,
-            "base_branch": base_branch,
-            "app_label": app_label,
-            "yaml_path": yaml_path,
-            "workflow_file": workflow_file,
-            "workflow_ref": workflow_ref,
-        }
-
+        base_branch = st.text_input("Base branch", value="")
+        app_label = st.text_input("App label", value="app1")
+        yaml_path = st.text_input("YAML path", value="apps/app1/values-dev-us.yaml")
+        workflow_file = st.text_input("Workflow filename", value="ci-tests.yml")
+        workflow_ref = st.text_input("Workflow ref (branch/tag)", value="")
+        return {"gh_token": gh_token, "owner": owner, "repo": repo, "base_branch": base_branch, "app_label": app_label, "yaml_path": yaml_path, "workflow_file": workflow_file, "workflow_ref": workflow_ref}
 
 def ensure_gh(cfg: Dict) -> Tuple[GH, str]:
     if not cfg["gh_token"]:
-        st.error("Please provide a GitHub token in the sidebar.")
+        st.error("Please provide a GitHub token.")
         st.stop()
     gh = GH(cfg["gh_token"])
     base_branch = cfg["base_branch"] or gh.get_default_branch(cfg["owner"], cfg["repo"])
     return gh, base_branch
 
-
 def section_nonprod(cfg: Dict):
     st.subheader("Non-Production")
-    col1, col2 = st.columns(2)
-    with col1:
-        env_label = st.text_input("Env label", value="dev-us")
-    with col2:
-        action = st.radio("Update target", ["primary (active)", "standby"], index=1,
-                          help="Primary updates the currently active slot; standby updates the non-active slot.")
+    env_label = st.text_input("Env label", value="dev-us")
+    action = st.radio("Update target", ["primary (active)", "standby"], index=1)
     new_version = st.text_input("Version to set", value="1.2.3")
-
+    turn_off_req = st.checkbox("Turn off standby switch after flip (Non-Prod)", value=False)
     if st.button("Generate PR for version update", type="primary"):
         gh, base_branch = ensure_gh(cfg)
-        # Load YAML to detect active
         doc, _, _ = load_yaml_from_repo(gh, cfg["owner"], cfg["repo"], cfg["yaml_path"], base_branch)
         active = detect_active_slot(doc)
         target = active if action.startswith("primary") else standby_slot(active)
-
-        res = propose_version_update(
-            gh,
-            cfg["owner"], cfg["repo"], base_branch,
-            cfg["yaml_path"], cfg["app_label"], env_label, target, new_version
-        )
+        res = propose_version_update(gh, cfg["owner"], cfg["repo"], base_branch, cfg["yaml_path"], cfg["app_label"], env_label, target, new_version)
         pr = res["pr"]
         st.success("PR created!")
         st.write(f"**PR:** [{pr['title']}]({pr['html_url']})  ")
-        st.code(json.dumps(pr, indent=2))
-
 
 def section_prod(cfg: Dict):
     st.subheader("Production")
     env_label = st.text_input("Env label (prod variant)", value="prod-us")
     new_version = st.text_input("Standby version to set", value="2.0.0")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        trigger_tests = st.checkbox("Trigger GitHub Actions tests after PR", value=True)
-    with c2:
-        auto_flip_ready = st.checkbox("Enable Auto Flip step", value=True,
-                                      help="After tests are verified, create a PR to flip active slot.")
-
-    inputs_raw = st.text_area(
-        "Workflow inputs (JSON)",
-        value=json.dumps({"app": "app1", "env": "prod", "version": "2.0.0"}, indent=2),
-        height=140,
-    )
-
+    trigger_tests = st.checkbox("Trigger GitHub Actions tests after PR", value=True)
+    auto_flip_ready = st.checkbox("Enable Auto Flip step", value=True)
+    turn_off_req = st.checkbox("Turn off standby switch after flip", value=False)
+    inputs_raw = st.text_area("Workflow inputs (JSON)", value=json.dumps({"app": "app1", "env": "prod", "version": "2.0.0"}, indent=2), height=140)
     if st.button("Create PR to update STANDBY version", type="primary"):
         gh, base_branch = ensure_gh(cfg)
         doc, _, _ = load_yaml_from_repo(gh, cfg["owner"], cfg["repo"], cfg["yaml_path"], base_branch)
         active = detect_active_slot(doc)
         target = standby_slot(active)
-        res = propose_version_update(
-            gh, cfg["owner"], cfg["repo"], base_branch, cfg["yaml_path"], cfg["app_label"], env_label, target, new_version
-        )
+        res = propose_version_update(gh, cfg["owner"], cfg["repo"], base_branch, cfg["yaml_path"], cfg["app_label"], env_label, target, new_version)
         pr = res["pr"]
         st.success("Standby update PR created!")
         st.write(f"**PR:** [{pr['title']}]({pr['html_url']})  ")
-
         if trigger_tests and cfg["workflow_file"]:
-            try:
-                inputs = json.loads(inputs_raw) if inputs_raw.strip() else {}
-            except Exception as e:
-                st.error(f"Invalid workflow inputs JSON: {e}")
-                st.stop()
+            inputs = json.loads(inputs_raw) if inputs_raw.strip() else {}
             ref = cfg["workflow_ref"] or cfg["base_branch"] or base_branch
             gh.dispatch_workflow(cfg["owner"], cfg["repo"], cfg["workflow_file"], ref, inputs)
-            st.info("Workflow dispatched. You can check recent runs below.")
-
-    st.divider()
-    st.markdown("### Check Test Status")
-    if st.button("List recent workflow runs"):
-        gh, base_branch = ensure_gh(cfg)
-        ref = cfg["workflow_ref"] or cfg["base_branch"] or base_branch
-        runs = gh.list_workflow_runs(cfg["owner"], cfg["repo"], cfg["workflow_file"], branch=ref)
-        for run in runs.get("workflow_runs", [])[:5]:
-            st.write(f"- **{run['name']}** — status: `{run['status']}` conclusion: `{run['conclusion']}`  ")
-            st.write(f"  Run: {run['html_url']}")
-
+            st.info("Workflow dispatched.")
     st.divider()
     st.markdown("### Auto Flip (after tests verified)")
     if auto_flip_ready and st.button("Create PR to AUTO FLIP active slot"):
         gh, base_branch = ensure_gh(cfg)
-        res = propose_auto_flip(
-            gh, cfg["owner"], cfg["repo"], base_branch, cfg["yaml_path"], cfg["app_label"], env_label
-        )
+        res = propose_auto_flip(gh, cfg["owner"], cfg["repo"], base_branch, cfg["yaml_path"], cfg["app_label"], env_label, turn_off_switch=turn_off_req)
         pr = res["pr"]
         st.success(f"Auto-flip PR created! New active: {res['new_active']}")
         st.write(f"**PR:** [{pr['title']}]({pr['html_url']})  ")
 
-
 def main():
     ui_header()
     cfg = ui_sidebar()
-
-    st.markdown(
-        "> **Tip:** Point `YAML path` to the exact file (e.g., `apps/app2/values-qa.yaml`).\n> The app will read it, detect the active slot, and generate PRs accordingly."
-    )
-
-    tab1, tab2 = st.tabs(["Non-Prod", "Prod"])
-    with tab1:
-        section_nonprod(cfg)
-    with tab2:
-        section_prod(cfg)
-
-
-if __name__ == "__main__":
-    main()
+    tab1,
 
 # =========================
 # requirements.txt
