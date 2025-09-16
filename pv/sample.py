@@ -297,7 +297,15 @@ def section_prod(cfg: Dict):
 def main():
     ui_header()
     cfg = ui_sidebar()
-    tab1,
+    tab1, tab2 = st.tabs(["Non-Prod", "Prod"])
+    with tab1:
+        section_nonprod(cfg)
+    with tab2:
+        section_prod(cfg)
+
+if __name__ == "__main__":
+    main()
+
 
 # =========================
 # requirements.txt
