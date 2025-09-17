@@ -38,3 +38,22 @@ livenessProbe:
   periodSeconds: 15         # check every 15s
   failureThreshold: 3       # after 3 failed checks, restart pod
 
+startupProbe:
+  exec:
+    command: ["sh", "-c", "test -d /mnt/data"]
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 30
+
+readinessProbe:
+  exec:
+    command: ["sh", "-c", "test -d /mnt/data"]
+  initialDelaySeconds: 10
+  periodSeconds: 10
+
+livenessProbe:
+  exec:
+    command: ["sh", "-c", "test -d /mnt/data"]
+  initialDelaySeconds: 20
+  periodSeconds: 15
+  failureThreshold: 3
