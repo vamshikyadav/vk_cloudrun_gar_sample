@@ -1,182 +1,130 @@
-import os
 import streamlit as st
-import yaml
-from github import Github
 import requests
-from dotenv import load_dotenv
+import os
+import json
+import time
 
-# --- Load .env if present ---
-load_dotenv()
+# ===================
+# 🔑 GitHub settings
+# ===================
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # export before running
+OWNER = "your-org"
+REPO = "your-repo"
+BRANCH = "main"
 
-# --- ENVIRONMENT VARIABLES ---
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-REPO_NAME = os.getenv("REPO_NAME")  # e.g. "your-org/your-repo"
-HELM_CHART_DIR = "helm-chart"
+headers = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github.v3+json",
+}
 
-if not GITHUB_TOKEN or not REPO_NAME:
-    st.error("❌ Missing required env vars: GITHUB_TOKEN and REPO_NAME")
-    st.stop()
+# ===================
+# 📝 Utility functions
+# ===================
+def get_apps():
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/helm-chart"
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return [item["name"] for item in resp.json() if item["type"] == "dir"]
 
-# --- GITHUB CLIENT ---
-g = Github(GITHUB_TOKEN)
-repo = g.get_repo(REPO_NAME)
+def get_workflows():
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows"
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()["workflows"]
 
-# --- STYLE + LOGO ---
-st.set_page_config(page_title="Helm Ops Console", page_icon="⚡", layout="wide")
+def trigger_workflow(workflow_filename, app_versions):
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{workflow_filename}/dispatches"
+    payload = {
+        "ref": BRANCH,
+        "inputs": {
+            "app_versions": json.dumps(app_versions)  # proper JSON string
+        }
+    }
+    r = requests.post(url, headers=headers, json=payload)
+    return r
 
+def get_latest_run(workflow_filename):
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{workflow_filename}/runs?branch={BRANCH}&per_page=1"
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200:
+        return None
+    runs = r.json().get("workflow_runs", [])
+    return runs[0] if runs else None
+
+# ===================
+# 🎨 Streamlit UI
+# ===================
+st.set_page_config(page_title="Blue-Green Control Panel", layout="wide")
+
+# Operations log
+log_container = st.container()
+with log_container:
+    st.subheader("📜 Operations Log")
+
+# Flashy header
 st.markdown(
     """
-    <style>
-    .top-bar {
-        display: flex;
-        align-items: center;
-        justify-content: left;
-        background: linear-gradient(90deg, #141e30, #243b55);
-        padding: 10px 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-    }
-    .top-bar img {
-        height: 50px;
-        margin-right: 15px;
-    }
-    .top-bar h1 {
-        color: white;
-        font-size: 28px;
-        margin: 0;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    """
-    <div class="top-bar">
-        <img src="https://img.icons8.com/external-flaticons-flat-flat-icons/64/ffffff/external-rocket-startup-flaticons-flat-flat-icons.png" />
-        <h1>Helm Chart Operations Console 🚀</h1>
+    <div style="text-align:center; padding:15px; background:linear-gradient(to right, #0f2027, #203a43, #2c5364); color:white; border-radius:12px;">
+    <h1>🚀 Blue-Green Deployment Panel</h1>
+    <p>Select apps, enter versions, trigger workflows & track status</p>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# --- STREAMLIT UI ---
-st.subheader("Application & Environment Selection")
+# Workflow selection
+workflows = get_workflows()
+workflow_map = {wf["name"]: wf["path"].split("/")[-1] for wf in workflows if "Blue-Green" in wf["name"]}
+workflow_choice = st.selectbox("Select Workflow", list(workflow_map.keys()))
+workflow_file = workflow_map[workflow_choice]
 
-# Step 1: Select applications
-apps = [d.name for d in repo.get_contents(HELM_CHART_DIR) if d.type == "dir"]
-selected_apps = st.multiselect("📦 Select Applications", apps)
+with log_container:
+    st.info(f"Loaded workflow: {workflow_choice} ({workflow_file})")
 
-# Step 2: Select environment & region
-col1, col2 = st.columns(2)
-with col1:
-    env = st.selectbox("🌍 Select Environment", ["dev", "qa", "prod"])
-with col2:
-    region = st.selectbox("📡 Select Region", ["us", "eu", "apac"])
+# Apps list
+apps = get_apps()
+selected_apps = st.multiselect("Select apps to deploy", apps)
 
-# Step 3: Choose operation
-st.subheader("Operations")
-operation = st.radio("⚙️ Choose Operation", [
-    "Update Primary",
-    "Update Standby",
-    "Autoflip",
-    "Turn off Standby"
-])
+# Versions
+app_versions = {}
+cols = st.columns(2)
+for idx, app in enumerate(selected_apps):
+    with cols[idx % 2]:
+        version = st.text_input(f"Version for {app}", value="1.0.0")
+        app_versions[app] = version
 
-# Step 4: Workflow trigger (only for standby/autoflip)
-workflow_name = None
-workflow_param = None
-if operation in ["Update Standby", "Autoflip"]:
-    st.subheader("Workflow Trigger")
-    workflow_name = st.text_input("Workflow Name (GitHub Actions)")
-    workflow_param = st.text_input("Workflow Parameter")
+# Trigger button
+if st.button("🔥 Trigger Workflow"):
+    with log_container:
+        st.write("Triggering workflow…")
+    response = trigger_workflow(workflow_file, app_versions)
+    if response.status_code == 204:
+        with log_container:
+            st.success(f"✅ {workflow_choice} triggered for {len(app_versions)} apps")
 
-# --- YAML Update Logic ---
-def update_yaml(file_content, operation, new_version):
-    data = yaml.safe_load(file_content)
+        # Fetch and display status
+        st.write("🔄 Fetching workflow run status...")
+        time.sleep(3)  # short wait for GitHub to register run
+        run = get_latest_run(workflow_file)
+        if run:
+            run_url = run["html_url"]
+            st.markdown(f"🔗 [View run on GitHub]({run_url})")
 
-    blue_active = data.get("blue", {}).get("activeSlot")
-    green_active = data.get("green", {}).get("activeSlot")
-
-    if operation == "Update Primary":
-        if blue_active == "blue":
-            data["appversion_blue"] = new_version
+            with st.empty():
+                while True:
+                    run = get_latest_run(workflow_file)
+                    if not run:
+                        st.error("❌ Could not fetch run status.")
+                        break
+                    status = run["status"]
+                    conclusion = run.get("conclusion")
+                    st.write(f"📊 Status: **{status}**")
+                    if conclusion:
+                        st.write(f"✅ Conclusion: **{conclusion}**")
+                        break
+                    time.sleep(10)  # refresh every 10s
         else:
-            data["appversion_green"] = new_version
-
-    elif operation == "Update Standby":
-        if blue_active == "blue":
-            data["appversion_green"] = new_version
-        else:
-            data["appversion_blue"] = new_version
-
-    elif operation == "Autoflip":
-        if blue_active == "blue":
-            data["blue"].update({
-                "blueswitch": "on", "enabled": True,
-                "activeSlot": "green", "weight": 0, "standbyWeight": 100
-            })
-            data["green"].update({
-                "blueswitch": "on", "enabled": True,
-                "activeSlot": "green", "weight": 100, "standbyWeight": 0
-            })
-        else:
-            data["blue"].update({
-                "blueswitch": "on", "enabled": True,
-                "activeSlot": "blue", "weight": 100, "standbyWeight": 0
-            })
-            data["green"].update({
-                "blueswitch": "on", "enabled": True,
-                "activeSlot": "blue", "weight": 0, "standbyWeight": 100
-            })
-
-    elif operation == "Turn off Standby":
-        if blue_active == "blue":
-            data["green"]["blueswitch"] = "off"
-        else:
-            data["blue"]["blueswitch"] = "off"
-
-    return yaml.dump(data, sort_keys=False)
-
-# --- Submit ---
-st.subheader("Execution")
-new_version = st.text_input("Enter New Version (if applicable)", "new-version")
-
-if st.button("🚀 Submit Changes"):
-    for app in selected_apps:
-        file_path = f"{HELM_CHART_DIR}/{app}/values-{env}-{region}.yaml"
-        file = repo.get_contents(file_path)
-        updated_yaml = update_yaml(file.decoded_content.decode(), operation, new_version)
-
-        branch = f"{app}-{operation.lower()}-update"
-        base = repo.get_branch("main")
-        try:
-            repo.create_git_ref(ref=f"refs/heads/{branch}", sha=base.commit.sha)
-        except Exception:
-            st.warning(f"⚠️ Branch {branch} already exists, using it...")
-
-        repo.update_file(
-            path=file_path,
-            message=f"[Streamlit] {operation} update for {app}",
-            content=updated_yaml,
-            sha=file.sha,
-            branch=branch
-        )
-
-        pr = repo.create_pull(
-            title=f"{operation} update for {app}",
-            body="Automated update via Streamlit app",
-            head=branch,
-            base="main"
-        )
-        st.success(f"✅ PR created: {pr.html_url}")
-
-        if workflow_name and workflow_param:
-            url = f"https://api.github.com/repos/{REPO_NAME}/actions/workflows/{workflow_name}/dispatches"
-            headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-            payload = {"ref": "main", "inputs": {"param": workflow_param}}
-            resp = requests.post(url, headers=headers, json=payload)
-            if resp.status_code == 204:
-                st.info(f"🚀 Workflow {workflow_name} triggered with param `{workflow_param}`")
-            else:
-                st.error(f"❌ Failed to trigger workflow: {resp.text}")
+            st.error("❌ No recent run found.")
+    else:
+        with log_container:
+            st.error(f"❌ Failed: {response.status_code} - {response.text}")
