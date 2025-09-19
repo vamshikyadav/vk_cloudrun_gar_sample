@@ -3,15 +3,15 @@ import requests
 import os
 import json
 import time
-import yaml
 
 # ===================
 # 🔑 GitHub settings
 # ===================
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()  # strip fixes newline issue
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 OWNER = "your-org"   # 🔥 change me
 REPO = "your-repo"   # 🔥 change me
 BRANCH = "main"
+WORKFLOW_FILE = "bluegreen.yaml"   # matches .github/workflows/bluegreen.yaml
 
 headers = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -28,123 +28,103 @@ def get_apps():
     r.raise_for_status()
     return [item["name"] for item in r.json() if item["type"] == "dir"]
 
-def get_workflows():
-    """Fetch workflows in repo"""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows"
-    r = requests.get(url, headers=headers)
-    r.raise_for_status()
-    return r.json()["workflows"]
-
-def get_workflow_yaml(workflow_path):
-    """Fetch workflow YAML definition"""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{workflow_path}"
-    r = requests.get(url, headers=headers)
-    r.raise_for_status()
-    download_url = r.json()["download_url"]
-    yaml_text = requests.get(download_url).text
-    return yaml.safe_load(yaml_text)
-
-def trigger_workflow(workflow_filename, inputs):
+def trigger_workflow(inputs):
     """Trigger workflow_dispatch"""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{workflow_filename}/dispatches"
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     payload = {"ref": BRANCH, "inputs": inputs}
     r = requests.post(url, headers=headers, json=payload)
     return r
 
-def get_latest_runs(workflow_filename, limit=3):
-    """Fetch latest workflow runs"""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{workflow_filename}/runs?branch={BRANCH}&per_page={limit}"
+def get_latest_run():
+    """Fetch the most recent run for this workflow"""
+    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW_FILE}/runs?branch={BRANCH}&per_page=1"
     r = requests.get(url, headers=headers)
     if r.status_code != 200:
-        return []
-    return r.json().get("workflow_runs", [])
-
-def get_run_jobs(run_id):
-    """Fetch jobs for a run"""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs/{run_id}/jobs"
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
-        return []
-    return r.json().get("jobs", [])
+        return None
+    runs = r.json().get("workflow_runs", [])
+    return runs[0] if runs else None
 
 # ===================
 # 🎨 Streamlit UI
 # ===================
-st.set_page_config(page_title="Blue-Green Deployment Panel", layout="wide")
+st.set_page_config(page_title="Blue-Green Autoswitch Panel", layout="wide")
 
-log_container = st.container()
-with log_container:
-    st.subheader("📜 Operations Log")
+# Custom CSS
+st.markdown(
+    """
+    <style>
+    .card {
+        background-color: #fbeaea;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # Header
 st.markdown(
     """
-    <div style="text-align:center; padding:15px; background:linear-gradient(to right, #1e3c72, #2a5298); color:white; border-radius:12px;">
-    <h1>🚀 Blue-Green Deployment Panel</h1>
-    <p>Trigger multiple workflows, track runs, and capture PRs</p>
+    <div style="text-align:center; padding:15px; background:linear-gradient(to right, #8e0e00, #b92b27); color:white; border-radius:12px;">
+    <h1>🚀 Blue-Green Autoswitch</h1>
+    <p>Trigger blue-green deployments for multiple services</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# Workflow selector
-workflows = get_workflows()
-workflow_map = {wf["name"]: wf["path"] for wf in workflows if "Blue-Green" in wf["name"]}
-workflow_choice = st.selectbox("Select Workflow", list(workflow_map.keys()))
-workflow_file = workflow_map[workflow_choice]
+# Inputs card
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.subheader("⚙️ Workflow Inputs")
 
-with log_container:
-    st.info(f"Loaded workflow: {workflow_choice} ({workflow_file})")
+version = st.text_input("Version", value="1.0.0")
 
-# Load apps from repo
+col1, col2 = st.columns(2)
+with col1:
+    update_primary = st.checkbox("Update Primary", value=False)
+    update_standy = st.checkbox("Update Standby", value=False)
+with col2:
+    autoflip = st.checkbox("Auto Flip", value=False)
+    turnoffstandby = st.checkbox("Turn Off Standby", value=False)
+
+businessunit = st.selectbox("Business Unit", ["us", "uk", "eu", "apac"])
+environment = st.selectbox("Environment", ["dev", "qa", "int", "prod"])
+
 apps = get_apps()
-selected_apps = st.multiselect("Select apps to deploy", apps)
+selected_apps = st.multiselect("Deployment Services (Apps)", apps)
+st.markdown('</div>', unsafe_allow_html=True)
 
-# Collect app versions
-app_versions = {}
-cols = st.columns(2)
-for idx, app in enumerate(selected_apps):
-    with cols[idx % 2]:
-        version = st.text_input(f"Version for {app}", value="1.0.0")
-        app_versions[app] = version
-
-# Optional: parse workflow_dispatch inputs from YAML (fallback if no apps)
-workflow_yaml = get_workflow_yaml(workflow_file)
-inputs_schema = workflow_yaml.get("on", {}).get("workflow_dispatch", {}).get("inputs", {})
-
-if not selected_apps and inputs_schema:
-    st.write("### Other Workflow Parameters")
-    for key, meta in inputs_schema.items():
-        default = meta.get("default", "")
-        desc = meta.get("description", key)
-        user_val = st.text_input(f"{desc} ({key})", value=default)
-        app_versions[key] = user_val
-
-# Trigger workflow
-if st.button("🔥 Trigger Workflow"):
-    with log_container:
-        st.info(f"Triggering {workflow_choice}...")
-    inputs = {"app_versions": json.dumps(app_versions)} if selected_apps else app_versions
-    response = trigger_workflow(workflow_file.split("/")[-1], inputs)
-    if response.status_code == 204:
-        st.success("✅ Triggered successfully")
-        time.sleep(3)
-        runs = get_latest_runs(workflow_file.split("/")[-1])
-        for run in runs:
-            st.session_state.setdefault("tracked_runs", []).append(run)
+# Trigger block
+st.markdown('<div class="card">', unsafe_allow_html=True)
+if st.button("🔥 Trigger Workflow(s)"):
+    if not selected_apps:
+        st.warning("⚠️ Please select at least one app")
     else:
-        st.error(f"❌ Failed: {response.status_code} - {response.text}")
+        for app in selected_apps:
+            inputs = {
+                "version": version,
+                "update_primary": str(update_primary).lower(),
+                "update_standy": str(update_standy).lower(),
+                "autoflip": str(autoflip).lower(),
+                "turnoffstandby": str(turnoffstandby).lower(),
+                "businessunit": businessunit,
+                "environment": environment,
+                "deployment_service": app,
+            }
 
-# Display tracked runs
-if "tracked_runs" in st.session_state:
-    st.write("### Tracked Workflow Runs")
-    for run in st.session_state["tracked_runs"]:
-        run_id = run["id"]
-        st.markdown(f"🔗 [{run['name']} #{run['run_number']}]({run['html_url']})")
-        st.write(f"📊 Status: {run['status']} | Conclusion: {run.get('conclusion')}")
+            st.write(f"📤 Sending inputs for **{app}**:", inputs)
 
-        jobs = get_run_jobs(run_id)
-        for job in jobs:
-            for step in job.get("steps", []):
-                if "Create PR" in step["name"] and step["conclusion"] == "success":
-                    st.success(f"✅ PR created in job {job['name']}")
+            response = trigger_workflow(inputs)
+            if response.status_code == 204:
+                st.success(f"✅ Workflow triggered for {app}")
+                time.sleep(2)  # let GitHub register the run
+                run = get_latest_run()
+                if run:
+                    st.markdown(f"🔗 [View run for {app}]({run['html_url']})")
+                    st.write(f"📊 Status: {run['status']}")
+            else:
+                st.error(f"❌ Failed for {app}: {response.status_code} - {response.text}")
+st.markdown('</div>', unsafe_allow_html=True)
