@@ -27,9 +27,23 @@ headers = {
 # ===================
 # 📝 GitHub API Helpers
 # ===================
+def require_repo_config():
+    errs = []
+    if not OWNER or OWNER == "your-org":
+        errs.append("OWNER is not set (env GITHUB_OWNER).")
+    if not REPO or REPO == "your-repo":
+        errs.append("REPO is not set (env GITHUB_REPO).")
+    if not BRANCH:
+        errs.append("BRANCH is not set (env GITHUB_BRANCH).")
+    return errs
+
 def get_apps():
     url = f"{GITHUB_API_URL}/repos/{OWNER}/{REPO}/contents/helm-chart?ref={BRANCH}"
     r = requests.get(url, headers=headers)
+    if r.status_code == 404:
+        raise RuntimeError(
+            f"404: Could not find helm-chart folder in {OWNER}/{REPO}@{BRANCH}"
+        )
     r.raise_for_status()
     return [item["name"] for item in r.json() if item.get("type") == "dir"]
 
@@ -66,21 +80,23 @@ def extract_pr_url(logs):
 # ===================
 st.set_page_config(page_title="Blue-Green Deployment Panel", layout="wide")
 
+# Matte red card style
 st.markdown(
     """
     <style>
-    .card {
-        background-color: #fbeaea;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
-        margin-bottom: 20px;
-    }
+      .card {
+          background-color: #fbeaea;
+          padding: 20px;
+          border-radius: 12px;
+          box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+          margin-bottom: 20px;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# Header
 st.markdown(
     """
     <div style="text-align:center; padding:15px; background:linear-gradient(90deg,#8e0e00,#b92b27); color:white; border-radius:12px;">
@@ -91,18 +107,35 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Config sanity
+cfg_errs = require_repo_config()
+if cfg_errs:
+    st.error("Configuration errors:\n- " + "\n- ".join(cfg_errs))
+
 # Workflow choice
+st.markdown('<div class="card">', unsafe_allow_html=True)
 workflow_choice = st.selectbox("Select Workflow", list(WORKFLOWS.keys()))
 workflow_file = WORKFLOWS[workflow_choice]
+st.caption(f"Workflow file: .github/workflows/{workflow_file} | Branch: {BRANCH}")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# Apps
+# List apps
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.subheader("📦 Services from `helm-chart/`")
 apps = []
+apps_error = None
 try:
     apps = get_apps()
 except Exception as e:
-    st.error(f"❌ Failed to load apps: {e}")
+    apps_error = str(e)
 
-# Inputs
+if apps_error:
+    st.error(apps_error)
+elif not apps:
+    st.warning("No apps found under `helm-chart/` on this branch.")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Workflow inputs
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("⚙️ Workflow Inputs")
 
@@ -133,7 +166,7 @@ elif workflow_choice == "Blue-Green Test Automation":
     selectrunstandby = st.checkbox("Run Standby", value=False)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Trigger
+# Trigger workflows
 st.markdown('<div class="card">', unsafe_allow_html=True)
 if st.button("🔥 Trigger Workflow(s)"):
     if not selected_apps:
@@ -151,7 +184,7 @@ if st.button("🔥 Trigger Workflow(s)"):
                     "environment": environment,
                     "deployment_service": app,
                 }
-            else:  # Test automation
+            else:
                 inputs = {
                     "selectforautomation": str(selectforautomation).lower(),
                     "selectrelease": selectrelease,
@@ -188,3 +221,13 @@ if st.button("🔥 Trigger Workflow(s)"):
                         else:
                             st.info("ℹ️ PR created but URL not found in logs")
 st.markdown('</div>', unsafe_allow_html=True)
+
+# Debug expander
+with st.expander("🔍 Debug Config"):
+    st.code(json.dumps({
+        "owner": OWNER,
+        "repo": REPO,
+        "branch": BRANCH,
+        "api_base": GITHUB_API_URL,
+        "workflows": WORKFLOWS
+    }, indent=2))
