@@ -43,11 +43,6 @@ def require_repo_config() -> List[str]:
 def get_apps() -> List[str]:
     url = f"{GITHUB_API_URL}/repos/{OWNER}/{REPO}/contents/helm-chart?ref={BRANCH}"
     r = requests.get(url, headers=api_headers())
-    if r.status_code == 404:
-        raise RuntimeError(
-            f"404: Could not find helm-chart/ in {OWNER}/{REPO}@{BRANCH}. "
-            "Check OWNER/REPO/BRANCH and folder path."
-        )
     r.raise_for_status()
     return [item["name"] for item in r.json() if item.get("type") == "dir"]
 
@@ -64,20 +59,6 @@ def trigger_workflow(workflow_file: str, inputs: Dict[str, str]) -> requests.Res
     payload = {"ref": BRANCH, "inputs": inputs}
     return requests.post(url, headers=api_headers(), json=payload)
 
-def wait_for_new_run(workflow_file: str, prev_ids: Set[int], timeout: int = 60, poll: float = 2.0) -> Optional[dict]:
-    """
-    After triggering a workflow, find the first run whose id wasn't present before.
-    Fixes 'wrong run link' when multiple triggers fire.
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        runs = list_runs(workflow_file, per_page=25)
-        for run in runs:
-            if run["id"] not in prev_ids:
-                return run
-        time.sleep(poll)
-    return None
-
 def get_run_by_id(run_id: int) -> Optional[dict]:
     url = f"{GITHUB_API_URL}/repos/{OWNER}/{REPO}/actions/runs/{run_id}"
     r = requests.get(url, headers=api_headers())
@@ -93,76 +74,22 @@ def get_run_jobs(run_id: int) -> List[dict]:
 def get_job_logs(job_id: int) -> str:
     url = f"{GITHUB_API_URL}/repos/{OWNER}/{REPO}/actions/jobs/{job_id}/logs"
     r = requests.get(url, headers=api_headers(), allow_redirects=True)
-    if r.status_code != 200:
-        return ""
-    try:
-        return r.text
-    except Exception:
-        return r.content.decode("utf-8", errors="ignore")
+    return r.text if r.status_code == 200 else ""
 
 def extract_pr_url(logs: str) -> Optional[str]:
     m = re.search(r"https://github\.com/[^\s]+/pull/\d+", logs)
     return m.group(0) if m else None
 
 # ===================
-# 🗂️ Tracked runs (in session)
-# ===================
-def init_state():
-    if "tracked_runs" not in st.session_state:
-        st.session_state["tracked_runs"] = []  # list of dicts: {app, wf_file, run_id, run_url, status, conclusion, pr_url}
-    if "page_loaded_once" not in st.session_state:
-        st.session_state["page_loaded_once"] = False
-
-def track_run(app: str, wf_file: str, run_obj: dict):
-    st.session_state["tracked_runs"].append({
-        "app": app,
-        "wf_file": wf_file,
-        "run_id": run_obj.get("id"),
-        "run_url": run_obj.get("html_url"),
-        "status": run_obj.get("status"),
-        "conclusion": run_obj.get("conclusion"),
-        "pr_url": None,
-    })
-
-def refresh_tracked_runs():
-    updated = []
-    for item in st.session_state["tracked_runs"]:
-        run = get_run_by_id(item["run_id"])
-        if run:
-            item["run_url"] = run.get("html_url")
-            item["status"] = run.get("status")
-            item["conclusion"] = run.get("conclusion")
-            # try to fetch PR once / until found
-            if not item.get("pr_url"):
-                jobs = get_run_jobs(item["run_id"])
-                found = None
-                for job in jobs:
-                    for step in job.get("steps", []):
-                        nm = (step.get("name") or "").lower()
-                        if ("pr" in nm) and (step.get("conclusion") == "success"):
-                            logs = get_job_logs(job["id"])
-                            url = extract_pr_url(logs)
-                            if url:
-                                found = url
-                                break
-                    if found:
-                        break
-                if found:
-                    item["pr_url"] = found
-        updated.append(item)
-    st.session_state["tracked_runs"] = updated
-
-# ===================
 # 🎨 Streamlit UI
 # ===================
 st.set_page_config(page_title="Blue-Green Deployment Panel", layout="wide")
-init_state()
 
-# Global styles (matte gray bg, flashy logo, pop buttons)
+# Matte gray style + flashy logo
 st.markdown(
     """
     <style>
-      .stApp { background: #f3f4f6; } /* matte gray */
+      .stApp { background: #f3f4f6; }
       .card {
           background-color: #ffffff;
           padding: 20px;
@@ -181,7 +108,6 @@ st.markdown(
           margin: 0;
       }
       @keyframes hue { 0% { filter: hue-rotate(0deg); } 100% { filter: hue-rotate(360deg); } }
-      .subtitle { color: #374151; margin-top: 4px; }
       .stButton>button {
           background: linear-gradient(90deg,#111827,#1f2937);
           color: white;
@@ -189,15 +115,10 @@ st.markdown(
           padding: 0.6rem 1.1rem;
           border-radius: 12px;
           box-shadow: 0 8px 20px rgba(0,0,0,0.2);
-          transition: transform 0.05s ease-in-out, box-shadow 0.2s ease;
       }
       .stButton>button:hover {
           transform: translateY(-1px);
           box-shadow: 0 10px 24px rgba(0,0,0,0.25);
-      }
-      .pill {
-          display:inline-block; padding:4px 10px; border-radius:12px; font-size:12px;
-          background:#e5e7eb; color:#111827; border:1px solid #d1d5db;
       }
     </style>
     """,
@@ -209,7 +130,7 @@ st.markdown(
     """
     <div style="text-align:center; padding:18px; background:#ffffff; border:1px solid #e5e7eb; border-radius:16px; box-shadow: 2px 2px 14px rgba(0,0,0,0.08); margin-bottom: 16px;">
       <h1 class="logo-text">Blue-Green Control Center</h1>
-      <div class="subtitle">Trigger autoswitch, container, or test automation — per-service versions, PR links & on-demand refresh</div>
+      <div class="subtitle">Trigger autoswitch, container, or test automation — per-service versions & PR links</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -227,22 +148,12 @@ workflow_file = WORKFLOWS[workflow_choice]
 st.caption(f"Workflow file: .github/workflows/{workflow_file} • Branch: {BRANCH}")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Services list
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.subheader("📦 Services from `helm-chart/`")
-apps, apps_error = [], None
+# Services
+apps = []
 try:
     apps = get_apps()
 except Exception as e:
-    apps_error = str(e)
-
-if apps_error:
-    st.error(apps_error)
-elif not apps:
-    st.warning("No apps found under `helm-chart/` on this branch.")
-else:
-    st.write(f"Found **{len(apps)}** services.")
-st.markdown('</div>', unsafe_allow_html=True)
+    st.error(str(e))
 
 # Inputs
 st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -259,6 +170,7 @@ if workflow_choice == "Blue-Green Autoswitch":
     with col2:
         autoflip       = st.checkbox("Auto Flip", value=False)
         turnoffstandby = st.checkbox("Turn Off Standby", value=False)
+        turnonstandby  = st.checkbox("Turn On Standby", value=False)  # NEW
 
     businessunit = st.selectbox("Business Unit", ["us", "uk", "eu", "apac"])
     environment  = st.selectbox("Environment",  ["dev", "qa", "int", "prod"])
@@ -270,6 +182,7 @@ if workflow_choice == "Blue-Green Autoswitch":
             versions[app] = st.text_input(f"Version for {app}", value="1.0.0")
 
 elif workflow_choice == "Blue-Green Test Automation":
+    version = st.text_input("Version", value="1.0.0")  # NEW
     selectforautomation = st.checkbox("Select for Automation", value=False)
     selectrelease       = st.selectbox("Release (Business Unit)", ["us", "uk", "eu", "apac"])
     selectenvironment   = st.selectbox("Environment", ["dev", "qa", "int", "prod"])
@@ -299,47 +212,44 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 # Trigger
 st.markdown('<div class="card">', unsafe_allow_html=True)
-trigger = st.button("🔥 Trigger Workflow(s)")
-refresh = st.button("🔄 Refresh Status")
-
-if trigger:
-    if not apps or not selected_apps:
+if st.button("🔥 Trigger Workflow(s)"):
+    if not selected_apps:
         st.warning("⚠️ Please select at least one app")
     else:
-        # Capture runs before triggering to correlate the new one
-        runs_before = list_runs(workflow_file, per_page=50)
-        before_ids = {r["id"] for r in runs_before}
-
         for app in selected_apps:
             if workflow_choice == "Blue-Green Autoswitch":
                 inputs = {
-                    "version":           versions.get(app, "1.0.0"),
-                    "update_primary":    str(update_primary).lower(),
-                    "update_standy":     str(update_standy).lower(),
-                    "autoflip":          str(autoflip).lower(),
-                    "turnoffstandby":    str(turnoffstandby).lower(),
-                    "businessunit":      businessunit,
-                    "environment":       environment,
+                    "version": versions.get(app, "1.0.0"),
+                    "update_primary": str(update_primary).lower(),
+                    "update_standy": str(update_standy).lower(),
+                    "autoflip": str(autoflip).lower(),
+                    "turnoffstandby": str(turnoffstandby).lower(),
+                    "turnonstandby": str(turnonstandby).lower(),
+                    "businessunit": businessunit,
+                    "environment": environment,
                     "deployment_service": app,
                 }
+
             elif workflow_choice == "Blue-Green Test Automation":
                 inputs = {
+                    "version": version,
                     "selectforautomation": str(selectforautomation).lower(),
-                    "selectrelease":       selectrelease,
-                    "selectenvironment":   selectenvironment,
-                    "selectservice":       app,
-                    "selectrunstandby":    str(selectrunstandby).lower(),
+                    "selectrelease": selectrelease,
+                    "selectenvironment": selectenvironment,
+                    "selectservice": app,
+                    "selectrunstandby": str(selectrunstandby).lower(),
                 }
-            else:  # Blue-Green Container
+
+            elif workflow_choice == "Blue-Green Container":
                 inputs = {
-                    "version":           versions.get(app, "1.0.0"),
-                    "update_primary":    str(update_primary).lower(),
-                    "update_standy":     str(update_standy).lower(),
-                    "autoflip":          str(autoflip).lower(),
-                    "turnoffstandby":    str(turnoffstandby).lower(),
-                    "turnonstandby":     str(turnonstandby).lower(),
-                    "businessunit":      businessunit,
-                    "environment":       environment,
+                    "version": versions.get(app, "1.0.0"),
+                    "update_primary": str(update_primary).lower(),
+                    "update_standy": str(update_standy).lower(),
+                    "autoflip": str(autoflip).lower(),
+                    "turnoffstandby": str(turnoffstandby).lower(),
+                    "turnonstandby": str(turnonstandby).lower(),
+                    "businessunit": businessunit,
+                    "environment": environment,
                     "deployment_service": app,
                 }
 
@@ -347,49 +257,6 @@ if trigger:
             resp = trigger_workflow(workflow_file, inputs)
             if resp.status_code != 204:
                 st.error(f"❌ Failed for {app}: {resp.status_code} - {resp.text}")
-                continue
-
-            st.success(f"✅ Triggered for {app}")
-            # Correlate to the actual new run for THIS trigger (fixes wrong run link)
-            new_run = wait_for_new_run(workflow_file, before_ids, timeout=90, poll=2.0)
-            if not new_run:
-                st.warning("Could not locate the new run yet. Use Refresh Status or open Actions UI.")
-                continue
-
-            before_ids.add(new_run["id"])  # so next app finds the next run
-            track_run(app, workflow_file, new_run)
-            st.markdown(f"🔗 Run for **{app}**: [{new_run.get('name')} #{new_run.get('run_number')}]({new_run.get('html_url')})")
-            st.write(f"📊 Status: {new_run.get('status')} | Conclusion: {new_run.get('conclusion')}")
-
-if refresh or (not st.session_state["page_loaded_once"]):
-    refresh_tracked_runs()
-    st.session_state["page_loaded_once"] = True
-
+            else:
+                st.success(f"✅ Workflow triggered for {app}")
 st.markdown('</div>', unsafe_allow_html=True)
-
-# Tracked runs panel
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.subheader("📜 Tracked Workflow Runs")
-if not st.session_state["tracked_runs"]:
-    st.info("No runs tracked yet. Trigger a workflow above.")
-else:
-    for item in st.session_state["tracked_runs"]:
-        run_title = f"{item['wf_file']} • {item['app']} • ID {item['run_id']}"
-        run_link = item.get("run_url") or "#"
-        st.markdown(f"🔗 **Run:** [{run_title}]({run_link})")
-        st.write(f"📊 Status: {item.get('status')} | Conclusion: {item.get('conclusion') or '—'}")
-        if item.get("pr_url"):
-            st.markdown(f"📎 **PR:** [{item['pr_url']}]({item['pr_url']})")
-        else:
-            st.caption("PR link not found yet (will appear if your workflow creates one).")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# Debug expander
-with st.expander("🔍 Debug Config"):
-    st.code(json.dumps({
-        "owner": OWNER,
-        "repo": REPO,
-        "branch": BRANCH,
-        "api_base": GITHUB_API_URL,
-        "workflows": WORKFLOWS
-    }, indent=2))
