@@ -3,7 +3,7 @@ import re
 import json
 import requests
 import streamlit as st
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # ===================
 # 🔧 Config
@@ -55,7 +55,7 @@ def trigger_workflow(workflow_file: str, inputs: Dict[str, str]) -> requests.Res
 # ===================
 st.set_page_config(page_title="Blue-Green Deployment Panel", layout="wide")
 
-# Matte gray style + flashy logo
+# Matte gray style + flashy logo + dropdown outline
 st.markdown(
     """
     <style>
@@ -90,6 +90,12 @@ st.markdown(
           transform: translateY(-1px);
           box-shadow: 0 10px 24px rgba(0,0,0,0.25);
       }
+      /* dropdown outline */
+      div[data-baseweb="select"] > div {
+          border: 2px solid #374151 !important;
+          border-radius: 8px !important;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -105,6 +111,10 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# State
+if "tracked_runs" not in st.session_state:
+    st.session_state["tracked_runs"] = []
 
 # Config sanity
 cfg_errs = require_repo_config()
@@ -205,7 +215,7 @@ if st.button("🔥 Trigger Workflow(s)"):
                     "test_automation": str(test_automation).lower(),
                     "businessunit": businessunit,
                     "environment": environment,
-                    "deploymentservice": app,  # match your YAML
+                    "deploymentservice": app,  # match YAML
                     "standby": str(standby).lower(),
                     "version": version,
                 }
@@ -229,4 +239,21 @@ if st.button("🔥 Trigger Workflow(s)"):
                 st.error(f"❌ Failed for {app}: {resp.status_code} - {resp.text}")
             else:
                 st.success(f"✅ Workflow triggered for {app}")
+                st.session_state["tracked_runs"].append({
+                    "app": app,
+                    "workflow": workflow_choice,
+                    "inputs": inputs
+                })
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Refresh & Tracked Runs
+st.markdown('<div class="card">', unsafe_allow_html=True)
+if st.button("🔄 Refresh Status"):
+    if not st.session_state["tracked_runs"]:
+        st.info("No runs tracked yet.")
+    else:
+        st.subheader("📜 Tracked Workflow Runs")
+        for run in st.session_state["tracked_runs"]:
+            st.write(f"**App:** {run['app']} | **Workflow:** {run['workflow']}")
+            st.json(run["inputs"])
 st.markdown('</div>', unsafe_allow_html=True)
