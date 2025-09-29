@@ -1,9 +1,10 @@
 import os
 import re
 import json
+import time
 import requests
 import streamlit as st
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 # ===================
 # 🔧 Config
@@ -45,17 +46,34 @@ def get_apps() -> List[str]:
     r.raise_for_status()
     return [item["name"] for item in r.json() if item.get("type") == "dir"]
 
+def list_runs(workflow_file: str, per_page: int = 20) -> List[dict]:
+    url = f"{GITHUB_API_URL}/repos/{OWNER}/{REPO}/actions/workflows/{workflow_file}/runs"
+    params = {"branch": BRANCH, "event": "workflow_dispatch", "per_page": per_page}
+    r = requests.get(url, headers=api_headers(), params=params)
+    if r.status_code != 200:
+        return []
+    return r.json().get("workflow_runs", [])
+
 def trigger_workflow(workflow_file: str, inputs: Dict[str, str]) -> requests.Response:
     url = f"{GITHUB_API_URL}/repos/{OWNER}/{REPO}/actions/workflows/{workflow_file}/dispatches"
     payload = {"ref": BRANCH, "inputs": inputs}
     return requests.post(url, headers=api_headers(), json=payload)
+
+def wait_for_new_run(workflow_file: str, before_ids: Set[int], timeout: int = 60, poll: float = 2.0) -> Optional[dict]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        runs = list_runs(workflow_file, per_page=10)
+        for run in runs:
+            if run["id"] not in before_ids:
+                return run
+        time.sleep(poll)
+    return None
 
 # ===================
 # 🎨 Streamlit UI
 # ===================
 st.set_page_config(page_title="Blue-Green Deployment Panel", layout="wide")
 
-# Matte gray style + flashy logo + dropdown outline
 st.markdown(
     """
     <style>
@@ -96,6 +114,13 @@ st.markdown(
           border-radius: 8px !important;
           box-shadow: 0 1px 4px rgba(0,0,0,0.08);
       }
+      /* text input outline */
+      input[type="text"] {
+          border: 2px solid #374151 !important;
+          border-radius: 8px !important;
+          padding: 6px 10px !important;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -106,7 +131,7 @@ st.markdown(
     """
     <div style="text-align:center; padding:18px; background:#ffffff; border:1px solid #e5e7eb; border-radius:16px; box-shadow: 2px 2px 14px rgba(0,0,0,0.08); margin-bottom: 16px;">
       <h1 class="logo-text">Blue-Green Control Center</h1>
-      <div class="subtitle">Trigger autoswitch, container, or test automation — per-service versions & PR links</div>
+      <div class="subtitle">Trigger autoswitch, container, or test automation — per-service versions & run links</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -196,6 +221,8 @@ if st.button("🔥 Trigger Workflow(s)"):
     if not selected_apps:
         st.warning("⚠️ Please select at least one app")
     else:
+        before_ids = {r["id"] for r in list_runs(workflow_file, per_page=20)}
+
         for app in selected_apps:
             if workflow_choice == "Blue-Green Autoswitch":
                 inputs = {
@@ -238,12 +265,22 @@ if st.button("🔥 Trigger Workflow(s)"):
             if resp.status_code != 204:
                 st.error(f"❌ Failed for {app}: {resp.status_code} - {resp.text}")
             else:
-                st.success(f"✅ Workflow triggered for {app}")
-                st.session_state["tracked_runs"].append({
-                    "app": app,
-                    "workflow": workflow_choice,
-                    "inputs": inputs
-                })
+                run = wait_for_new_run(workflow_file, before_ids, timeout=60, poll=2.0)
+                if run:
+                    st.success(f"✅ Workflow triggered for {app}")
+                    st.markdown(f"🔗 [View GitHub Actions run for {app}]({run['html_url']})")
+                    st.write(f"📊 Status: {run['status']} | Conclusion: {run.get('conclusion')}")
+                    before_ids.add(run["id"])
+                    st.session_state["tracked_runs"].append({
+                        "app": app,
+                        "workflow": workflow_choice,
+                        "inputs": inputs,
+                        "run_url": run["html_url"],
+                        "status": run["status"],
+                        "conclusion": run.get("conclusion")
+                    })
+                else:
+                    st.warning("⚠️ Could not find the new run yet. Check Actions UI.")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # Refresh & Tracked Runs
@@ -255,5 +292,8 @@ if st.button("🔄 Refresh Status"):
         st.subheader("📜 Tracked Workflow Runs")
         for run in st.session_state["tracked_runs"]:
             st.write(f"**App:** {run['app']} | **Workflow:** {run['workflow']}")
+            if run.get("run_url"):
+                st.markdown(f"🔗 [Run link]({run['run_url']})")
+            st.write(f"📊 Status: {run.get('status')} | Conclusion: {run.get('conclusion')}")
             st.json(run["inputs"])
 st.markdown('</div>', unsafe_allow_html=True)
