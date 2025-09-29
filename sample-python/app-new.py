@@ -192,7 +192,11 @@ elif workflow_choice == "Blue-Green Test Automation":
     environment     = st.selectbox("Environment", ["dev", "qa", "int"])
     selected_apps   = st.multiselect("Deployment Services (Apps)", apps)
     standby         = st.checkbox("Standby", value=False)
-    version         = st.text_input("Version", value="1.0.0")
+
+    if selected_apps:
+        st.write("### Per-App Versions")
+        for app in selected_apps:
+            versions[app] = st.text_input(f"Version for {app}", value="1.0.0")
 
 elif workflow_choice == "Blue-Green Container":
     col1, col2 = st.columns(2)
@@ -207,9 +211,10 @@ elif workflow_choice == "Blue-Green Container":
     businessunit = st.selectbox("Business Unit", ["us", "uk", "eu", "apac"])
     environment  = st.selectbox("Environment",  ["dev", "qa", "int", "prod"])
 
-    selected_apps = st.multiselect("Deployment Services (Apps)", apps)
+    # Hard-coded single app
+    selected_apps = st.multiselect("Deployment Service", ["container-app"])
     if selected_apps:
-        st.write("### Per-App Versions")
+        st.write("### Per-App Version")
         for app in selected_apps:
             versions[app] = st.text_input(f"Version for {app}", value="1.0.0")
 
@@ -242,9 +247,9 @@ if st.button("🔥 Trigger Workflow(s)"):
                     "test_automation": str(test_automation).lower(),
                     "businessunit": businessunit,
                     "environment": environment,
-                    "deploymentservice": app,  # match YAML
+                    "deploymentservice": app,
                     "standby": str(standby).lower(),
-                    "version": version,
+                    "version": versions.get(app, "1.0.0"),
                 }
 
             elif workflow_choice == "Blue-Green Container":
